@@ -1,0 +1,61 @@
+# oomguard config: ~/.config/oomguard/config.toml
+# Every key is optional; the values below are the defaults.
+# Check it with `oomguard config`; see what would be killed with `oomguard status`.
+
+interval_seconds = 1          # how often to sample
+dry_run = false               # log and notify what would be killed, but never kill
+
+[trigger]
+# "Occupancy" is how full the kernel's memory compressor is (0 to 1). It counts memory in RAM
+# and in swap; at 0.98 the kernel declares memory exhausted, pauses apps and may freeze.
+kill_occupancy = 0.85         # kill after 2 seconds at or above this
+kill_occupancy_now = 0.92     # kill immediately at or above this
+kill_eta_seconds = 60         # kill when occupancy would reach 0.98 within this long (from half full)
+# "Headroom" is the room left for swap: free disk plus unused swapfile space.
+kill_headroom_gb = 4          # kill after 2 seconds below this
+kill_headroom_now_gb = 2      # kill immediately below this
+# The kernel's own pressure level ignores swap and flickers, so it is only a backstop:
+pressure_critical_seconds = 10    # kill after this much accumulated critical pressure; 0 disables
+warn_occupancy = 0.60         # warn you and the owning agent at or above this
+warn_eta_seconds = 300        # ... or when occupancy would reach 0.98 within this long
+warn_headroom_gb = 0          # ... or when headroom is below this; 0 means the Mac's RAM size
+settle_seconds = 5            # after a kill, only the "immediately" triggers may kill again for this long
+
+[victim]
+min_size_gb = 2               # never kill a job smaller than this
+# Regexes matched against a job's command line and leader process name.
+prefer = []                   # killed before anything else, e.g. ["make_dataset\\.py"]
+avoid = []                    # killed only when nothing else qualifies, e.g. ["OrbStack"]
+# never = [...]               # replaces the default never-kill list (terminals, tmux, Finder, Dock)
+never_extra = []              # adds to the default never-kill list, e.g. ["^Xcode$"]
+
+[kill]
+term_seconds = 0              # 0: SIGKILL at once. N: SIGTERM first, SIGKILL after N seconds.
+                              # The "immediately" triggers always SIGKILL.
+
+[agents]
+enabled = true                # at the warning stage, tell the coding agent that started the biggest job
+names = ["claude", "codex"]   # agent executables, matched against argv[0] and process name
+tmux = ""                     # tmux binary; empty searches /opt/homebrew/bin, /usr/local/bin, /usr/bin
+# message = "..."             # typed into the agent's tmux pane; {size} {command} {pgid}
+
+[notify]
+enabled = true                # macOS notifications for warnings and kills
+
+[recorder]
+enabled = true                # one line of every reading per sample, in ~/.local/state/oomguard/
+max_mb = 50                   # disk budget for those samples (about 5 days at 1 sample/second)
+
+[guard]
+jetsam_band = 180             # priority band the guard moves itself into so the kernel's own
+                              # memory-shortage kill (band 0 only) cannot take it; 0 leaves it alone
+
+[hooks]
+# Shell commands run with OOMGUARD_EVENT, OOMGUARD_PGID, OOMGUARD_BYTES, OOMGUARD_COMMAND and
+# OOMGUARD_DRY_RUN set. on_agent_job also gets OOMGUARD_AGENT_PID, OOMGUARD_AGENT_NAME,
+# OOMGUARD_TMUX_PANE and OOMGUARD_MESSAGE. pre_kill runs before the kill for at most 3s, and is
+# skipped when an "immediately" trigger fires.
+on_warn = ""
+on_agent_job = ""
+pre_kill = ""
+post_kill = ""
