@@ -14,6 +14,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - name: Use Swift 6 (macOS 14 defaults to Xcode 15)
+        run: |
+          if swift --version 2>&1 | grep -q "Swift version 5"; then
+            sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)"
+          fi
+          swift --version
       - run: swift build
       - run: swift test
       - run: .build/debug/oomguard status

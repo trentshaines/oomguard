@@ -18,6 +18,15 @@ SESSION=oomguard-e2e-$$
 export XDG_STATE_HOME=$WORK/state
 trap 'tmux kill-session -t "$SESSION" 2>/dev/null || true; pkill -f "oomguard-e2e-pool" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $1"; cat "$WORK"/*.log 2>/dev/null || true; exit 1; }
+# Like GNU timeout, which macOS lacks: SIGTERM after N seconds (exit status 143 if it fired).
+timeout() {
+    local seconds=$1; shift
+    "$@" & local pid=$!
+    ( sleep "$seconds"; kill -TERM "$pid" 2>/dev/null ) & local watcher=$!
+    local status=0; wait "$pid" || status=$?
+    kill "$watcher" 2>/dev/null || true
+    return "$status"
+}
 
 cat > "$WORK/pool.c" <<'EOF'
 #include <stdlib.h>
@@ -78,7 +87,7 @@ set +e
 timeout 3 "$OOMGUARD" exec --max-gb 1 -- "$WORK/oomguard-e2e-pool" 1 300 2>/dev/null; roomy=$?
 set -e
 [ "$capped" = 137 ] || fail "process over its cap exited $capped, expected 137 (SIGKILL)"
-[ "$roomy" = 124 ] || fail "process under its cap exited $roomy, expected 124 (still running at timeout)"
+[ "$roomy" = 143 ] || fail "process under its cap exited $roomy, expected 143 (still running at timeout)"
 
 echo "PASS: warned and messaged the agent, killed the test job at the threshold, ran all hooks,"
 echo "      recorded samples and events, agent survived, and the kernel enforced exec --max-gb"
