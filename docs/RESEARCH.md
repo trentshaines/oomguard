@@ -236,7 +236,7 @@ instead), kernel zone leaks, and WindowServer panics with non-memory causes.
 v0.1 triggered on 30 s of continuous critical `memorystatus_vm_pressure_level`: the wrong signal
 (section 1) on the wrong time scale (section 4). It failed in the field on 2026-10-11: the level
 flickered between critical and warn for nine minutes, resetting the timer each time, and the
-final critical run froze the Mac in about 14 s. v0.2 implements the following.
+final critical run froze the Mac in about 14 s. v0.2 implements the following; v0.2.1 adds the tight-memory gate.
 
 **Signals** (sysctls and `statfs`, readable without root, no subprocess):
 
@@ -246,7 +246,8 @@ final critical run froze the Mac in about 14 s. v0.2 implements the following.
 | Swap headroom = min(free disk on `/System/Volumes/VM` + unused swapfile space, 100 GB − swap used) | `statfs`, `vm.swapusage` | Second cliff; the binding one on a full disk |
 | Time to full = (98% − occupancy) / fill rate over ~10 s | derived | Catches fast fills while occupancy is still moderate |
 | Pressure level | `kern.memorystatus_vm_pressure_level` | Backstop arm only |
-| Swap-in rate, `memorystatus_level` | sysctl | Recorded, not yet acted on |
+| Free memory, `kern.memorystatus_level` | sysctl | Gates the occupancy and time-to-full arms (v0.2.1, from the fill test below) |
+| Swap-in rate | sysctl | Recorded, not yet acted on |
 
 **Policy** (`Engine`, a pure function of the samples; defaults are configurable):
 
@@ -259,6 +260,10 @@ final critical run froze the Mac in about 14 s. v0.2 implements the following.
 - **One kill in flight**: SIGSTOP the process group (instant, needs no memory), SIGKILL it, wait
   for it to exit, then only the immediate arms may fire for a settle period.
 - A gap between samples is logged as a stall and never read as a fill rate.
+- **Occupancy only counts while memory is tight** (free memory ≤ 40% or pressure above
+  normal). Empty compressor segments are freed lazily, so after a crunch occupancy can sit near a
+  kill threshold with RAM free again; without the gate each kill would be followed by kills of
+  innocent jobs. Swap headroom and pressure arms are not gated.
 
 **Recorder**: every sample to `samples.tsv` (synced every 10 s and on every event), warnings and
 kills with their reasons to `events.log`.
@@ -277,11 +282,39 @@ benefit; code pages cannot be locked anyway); acting on swap-in rate (no calibra
 a root helper to cap or resume already-running processes (trust cost). The thresholds are first
 guesses: the recorder exists to calibrate them.
 
+### Controlled fill test, 2026-10-25 **[measured]**
+
+`scripts/fill-test.sh` on a 64 GB Mac mini (macOS 27): an 8-worker pool writing incompressible
+data at 1.5 GB/s, against a test guard set to kill 4–5 points above the starting occupancy. Every
+other job was protected by a `never` rule, and the installed guard kept running at its defaults.
+
+| Second | Segments | Pages | Free memory | Pressure |
+|---|---|---|---|---|
+| 0 | 16.5% | 7.8% | 67% | normal |
+| 1 | 18.6% | 8.6% | 63% | normal |
+| 2 | 28.2% | 11.0% | 48% | normal |
+| 3 | 30.7% | 12.1% | 41% | warn |
+| 4 | 34.0% | 13.0% | 36% | warn: killed (22 GB pool) |
+
+- **Occupancy moves fast once RAM is full**: up to 10 points in one second, much faster than the
+  pool's own rate, because the kernel compresses other apps' pages at the same time. Two strikes
+  at a threshold can therefore land a few points past it; the 92% immediate arm leaves 6 points
+  below the kernel's 98%.
+- **Segment occupancy is sticky.** 20 s after the kill free memory was back at 65% and pressure
+  normal, but segment occupancy stayed at 34% (42% after a second run), and page occupancy fell
+  back to 8%. The kernel compacts segments when it needs them: one run started at 24.5% and dropped
+  to 16.5% as the new fill began. Hence the tight-memory gate above.
+- **Segments, not pages, are the binding limit** for incompressible data: pages occupancy never
+  passed 13%.
+- The guard's 1 s sampling never stalled, and the installed guard warned through the agent
+  channel (it typed into the owning Claude Code session's tmux pane) before the test guard
+  killed. Free memory (`memorystatus_level`) fell 67% → 36% in 4 s, so the gate opens early in a
+  real fill.
+
 ## 8. Open questions and experiments
 
-- **Controlled fill test** on the test Mac: allocate in steps while recording every signal above,
-  stopping at ~60% compressor occupancy. Confirms the formulas against reality and measures how
-  fast occupancy moves. Makes the machine sluggish; not yet run.
+- A fill test with compressible data (2–3:1, like Python objects) on a 24 GB Mac, run to the
+  default 85%. That is the case the defaults are tuned for and it has not been measured.
 - Does launchd honor `JetsamProperties` in a third-party plist? Does it reset a band the guard
   raised itself?
 - Can a non-root guard cap a *running* process (not just a child it spawns)? Root can

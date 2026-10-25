@@ -1,5 +1,9 @@
 # oomguard
 
+> **Beta.** Tested with simulated readings, a real memory fill on a 64GB Mac mini, and CI on
+> macOS 14 and 15 (Apple Silicon and Intel). Thresholds are first estimates; run it with
+> `--dry-run` for a while if you want to see what it would do before trusting it.
+
 An early OOM killer for macOS, in the spirit of [earlyoom] and [systemd-oomd].
 
 When a job asks for more memory than a Mac has, macOS does not kill it. It compresses memory,
@@ -22,10 +26,13 @@ Once a second, straight from the kernel (no subprocesses):
 | **Headroom** | Room left for swap: free disk + unused swapfile space, capped at macOS's 100 GB of swapfiles | Swap can't outgrow the disk. A nearly full disk is a much lower ceiling. |
 | **Time to full** | Seconds until occupancy reaches 98% at the last 10 s fill rate | Catches a fast fill while occupancy is still moderate. |
 | **Pressure level** | The kernel's normal/warn/critical level | Backstop only: it ignores swap and flickers. |
+| **Free memory** | `kern.memorystatus_level`, the % of memory available | Gates the compressor triggers: the kernel frees empty segments lazily, so occupancy stays high after a crunch while RAM is free again. |
 
 ```
 warn    occupancy ≥ 60%, full in < 5 min, or headroom < RAM size
         → notification, and a message typed into the tmux pane of the agent that owns the biggest job
+
+        (occupancy and "full in" count only while free memory ≤ 40% or pressure is raised)
 
 kill    occupancy ≥ 92% or headroom < 2 GB                      immediately
         occupancy ≥ 85%, full in < 60 s, or headroom < 4 GB     after 2 seconds
@@ -56,8 +63,12 @@ brew install trentshaines/tap/oomguard
 brew services start oomguard
 ```
 
-From source (needs Swift 6): `make install-service PREFIX=~/.local` builds it, installs the binary
-and loads a launchd agent that starts it at login. `make uninstall PREFIX=~/.local` removes both.
+From source (needs Swift 6 from Xcode or the Command Line Tools):
+`make install-service PREFIX=~/.local` builds it, installs the binary and loads a launchd agent
+that starts it at login. `make uninstall PREFIX=~/.local` removes both.
+
+`oomguard status` says whether the guard is running; `sudo oomguard status` also shows the jetsam
+band it is in (reading it needs root).
 
 Try it before trusting it:
 
@@ -103,7 +114,10 @@ post_kill = "say 'oomguard killed a job'"
 To test rules and hooks without a real memory crisis, override a reading:
 `oomguard run --dry-run --simulate occupancy=0.9`. Without `--dry-run` the kill is real, so pair
 it with a `never` rule that protects everything but a test job, as
-[`scripts/e2e.sh`](scripts/e2e.sh) does.
+[`scripts/e2e.sh`](scripts/e2e.sh) does. [`scripts/fill-test.sh`](scripts/fill-test.sh) goes
+further: it really fills memory with a test pool and checks that a guard set a few points above
+the current occupancy kills it, on the kernel's own readings. It squeezes your other apps for a
+minute, so run it when that's fine.
 
 The default thresholds are starting points. After a tight-memory episode, `oomguard log` and the
 samples show how early each trigger fired on your machine; adjust from there.
@@ -115,6 +129,10 @@ samples show how early each trigger fired on your machine; adjust from there.
 - Memory spread over many small unrelated jobs, none over `min_size_gb`, leaves nothing to kill.
 - Jobs started without job control (e.g. `cmd &` in a non-interactive script) share their
   parent's group; oomguard then kills that whole group.
+- The jetsam band move and `oomguard exec --max-gb` use `posix_spawnattr_setjetsam_ext`, a
+  private libsystem call that launchd itself uses. It is looked up at run time: if a future macOS
+  drops it, oomguard logs that it could not change its band, keeps guarding, and `exec` says it
+  cannot cap memory. Everything else uses public interfaces (sysctl, libproc, signals).
 - A userspace guard competes for the resource it guards. oomguard is a small native binary that
   acts early and moves itself out of the priority band the kernel's own shortage kill targets,
   but under an extreme fill it can still be starved. `oomguard exec --max-gb` does not have that

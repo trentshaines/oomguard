@@ -2,13 +2,21 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 jobs:
   test:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple Silicon on macOS 14 and 15, and Intel.
+        os: [macos-14, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: swift build
       - run: swift test
       - run: .build/debug/oomguard status
       - run: .build/debug/oomguard config -c config.example.toml
+      - run: brew install tmux
+      - run: scripts/e2e.sh

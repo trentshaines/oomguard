@@ -20,6 +20,9 @@ warn_occupancy = 0.60         # warn you and the owning agent at or above this
 warn_eta_seconds = 300        # ... or when occupancy would reach 0.98 within this long
 warn_headroom_gb = 0          # ... or when headroom is below this; 0 means the Mac's RAM size
 settle_seconds = 5            # after a kill, only the "immediately" triggers may kill again for this long
+# The kernel frees empty compressor segments lazily, so occupancy stays high long after a crunch
+# ends. The occupancy and "full in" triggers therefore only count while memory is tight:
+tight_free_ram = 0.40         # free memory (kern.memorystatus_level) at or below this, or pressure above normal
 
 [victim]
 min_size_gb = 2               # never kill a job smaller than this

@@ -163,10 +163,16 @@ extension System {
 
 // Private but exported by libsystem since macOS 10.11; the kernel applies it without a
 // privilege check (bsd/kern/kern_exec.c). Used by launchd to place jobs in jetsam bands.
-@_silgen_name("posix_spawnattr_setjetsam_ext")
-private func posix_spawnattr_setjetsam_ext(
-    _ attr: UnsafeMutablePointer<posix_spawnattr_t?>, _ flags: Int16, _ priority: Int32,
-    _ memlimitActiveMB: Int32, _ memlimitInactiveMB: Int32) -> Int32
+// Looked up at run time so that a macOS without it degrades instead of failing to launch.
+private typealias SetJetsam = @convention(c) (
+    UnsafeMutablePointer<posix_spawnattr_t?>, Int16, Int32, Int32, Int32) -> Int32
+private let setJetsam: SetJetsam? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "posix_spawnattr_setjetsam_ext")
+    .map { unsafeBitCast($0, to: SetJetsam.self) }
+
+// memorystatus_control(MEMORYSTATUS_CMD_GET_PRIORITY_LIST): root only, even for oneself.
+private typealias MemorystatusControl = @convention(c) (UInt32, Int32, UInt32, UnsafeMutableRawPointer?, Int) -> Int32
+private let memorystatusControl: MemorystatusControl? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "memorystatus_control")
+    .map { unsafeBitCast($0, to: MemorystatusControl.self) }
 
 public enum Spawn {
     static let useEffectivePriority: Int16 = 0x1
@@ -174,23 +180,37 @@ public enum Spawn {
     static let memlimitInactiveFatal: Int16 = 0x8
     public static let defaultBand: Int32 = 180  // JETSAM_PRIORITY_DEFAULT
 
+    /// Whether this macOS still exports the private call that bands and memory caps rely on.
+    public static var available: Bool { setJetsam != nil }
+
     /// Replaces this process with `arguments` (argv[0] is looked up on PATH), placed in jetsam
     /// `band` and, if `limitMB` is given, under a kernel-enforced fatal memory limit: the kernel
     /// kills the process the moment its footprint passes the limit, with no help from userspace.
     /// The limit is per process and is not inherited by children. Returns only on failure.
     public static func exec(_ arguments: [String], band: Int32 = defaultBand, limitMB: Int32? = nil,
                             environment: [String: String] = ProcessInfo.processInfo.environment) -> Int32 {
+        guard let setJetsam else { return ENOTSUP }
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         defer { posix_spawnattr_destroy(&attr) }
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETEXEC))
         var flags = useEffectivePriority
         if limitMB != nil { flags |= memlimitActiveFatal | memlimitInactiveFatal }
-        let rc = posix_spawnattr_setjetsam_ext(&attr, flags, band, limitMB ?? -1, limitMB ?? -1)
+        let rc = setJetsam(&attr, flags, band, limitMB ?? -1, limitMB ?? -1)
         guard rc == 0 else { return rc }
         var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
         var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
         var pid: pid_t = 0
         return posix_spawnp(&pid, arguments[0], nil, &attr, &argv, &envp)
+    }
+
+    /// The jetsam band a process is in, or nil when it can't be read (that needs root).
+    public static func band(of pid: pid_t) -> Int32? {
+        // memorystatus_priority_entry_t: pid, priority, user_data, limit, state
+        struct Entry { var pid: Int32 = 0; var priority: Int32 = 0; var userData: UInt64 = 0; var limit: Int32 = 0; var state: UInt32 = 0 }
+        var entry = Entry()
+        guard let memorystatusControl,
+              memorystatusControl(1, pid, 0, &entry, MemoryLayout<Entry>.size) > 0, entry.pid == pid else { return nil }
+        return entry.priority
     }
 }

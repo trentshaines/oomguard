@@ -19,11 +19,13 @@ public final class Runner {
         self.recorder = Recorder(enabled: config.recorderEnabled, maxMB: config.recorderMaxMB)
     }
 
-    public func run() -> Never {
+    /// `protection` says what happened to the guard's own jetsam band, for the start-up line.
+    public func run(protection: String? = nil) -> Never {
         setvbuf(stdout, nil, _IOLBF, 0)
         log("oomguard started (pid \(getpid())\(config.dryRun ? ", dry run" : "")); kills the biggest job over "
             + "\(config.minSizeGB)GB at \(percent(config.killOccupancy)) compressor occupancy, under "
             + "\(Int(config.killEtaSeconds))s to full, or under \(config.killHeadroomGB)GB of swap headroom")
+        if let protection { log(protection) }
         if simulate != nil { log("SIMULATING readings: kills are real unless --dry-run") }
         while true {
             var signals = System.signals()

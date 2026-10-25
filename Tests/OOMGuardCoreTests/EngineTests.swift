@@ -6,10 +6,11 @@ func job(_ pgid: Int32 = 401, gb: Double = 52, agent: Agent? = nil) -> Job {
         command: "timeout python3 make_dataset.py", tier: .normal, agent: agent)
 }
 
-/// A healthy reading on a 24GB Mac; tests override what they are about.
-func reading(_ t: Double, occupancy: Double = 0.2, pressure: PressureLevel = .normal, headroomGB: Double = 70) -> Signals {
+/// A reading on a 24GB Mac with RAM full (as during any crunch); tests override what they are about.
+func reading(_ t: Double, occupancy: Double = 0.2, pressure: PressureLevel = .normal, headroomGB: Double = 70,
+             freeRAM: Int = 20) -> Signals {
     Signals(time: 1000 + t, segments: occupancy, pages: occupancy * 0.9, swapUsed: 5 * GB,
-            headroom: UInt64(headroomGB * Double(GB)), ram: 24 * GB, pressure: pressure, level: 50)
+            headroom: UInt64(headroomGB * Double(GB)), ram: 24 * GB, pressure: pressure, level: freeRAM)
 }
 
 struct Outcome {
@@ -137,4 +138,37 @@ func simulate(_ config: Config = Config(), seconds: Int, victim: Job? = job(), _
     var config = Config()
     config.pressureCriticalSeconds = 0
     #expect(simulate(config, seconds: 300) { t in reading(t, pressure: .critical) }.kills.isEmpty)
+}
+
+/// 2026-10-25 fill test on a 64GB Mac mini: after the pool was killed, free memory was back to
+/// 65% within 20s but compressor segment occupancy stayed where the crunch left it for good.
+/// Leftover empty segments are not a crunch, so nothing else may die for them.
+@Test func leftoverSegmentsWithFreeMemoryDoNotKill() {
+    let outcome = simulate(seconds: 600) { t in reading(t, occupancy: 0.95, freeRAM: 65) }
+    #expect(outcome.kills.isEmpty)
+    #expect(outcome.warns == 0)
+}
+
+@Test func raisedPressureMakesFreeMemoryReadingsTight() throws {
+    let outcome = simulate(seconds: 3) { t in reading(t, occupancy: 0.93, pressure: .warn, freeRAM: 65) }
+    #expect(try #require(outcome.kills.first).immediate)
+}
+
+@Test func swapHeadroomCountsEvenWithFreeMemory() throws {
+    let outcome = simulate(seconds: 1) { t in reading(t, headroomGB: 1.5, freeRAM: 65) }
+    #expect(try #require(outcome.kills.first).reasons.contains("swap headroom"))
+}
+
+/// The same fill, replayed: free memory fell 67% -> 36% while occupancy rose 4 points a second.
+@Test func realFillFromTheMacMiniKillsOnceTight() throws {
+    let trace: [(Double, Int, PressureLevel)] = [(0.165, 67, .normal), (0.186, 63, .normal), (0.282, 48, .normal),
+                                                 (0.307, 41, .warn), (0.340, 36, .warn), (0.36, 33, .warn)]
+    var config = Config()
+    config.killOccupancy = 0.285
+    config.killOccupancyNow = 0.335
+    let outcome = simulate(config, seconds: trace.count) { t in
+        let (occupancy, free, pressure) = trace[Int(t)]
+        return reading(t, occupancy: occupancy, pressure: pressure, freeRAM: free)
+    }
+    #expect(try #require(outcome.kills.first).time == 4)
 }

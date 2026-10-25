@@ -3,12 +3,12 @@
 class Oomguard < Formula
   desc "Early OOM killer for macOS: kills the biggest job before memory pressure crashes the Mac"
   homepage "https://github.com/trentshaines/oomguard"
-  url "https://github.com/trentshaines/oomguard/archive/refs/tags/v0.2.0.tar.gz"
+  url "https://github.com/trentshaines/oomguard/archive/refs/tags/v0.2.1.tar.gz"
   sha256 "REPLACE_WITH_RELEASE_SHA256"
   license "MIT"
 
-  depends_on :macos
-  depends_on xcode: ["15.0", :build]
+  # Builds with the Swift 6 in Xcode or the Command Line Tools.
+  depends_on macos: :ventura
 
   def install
     system "swift", "build", "--disable-sandbox", "-c", "release"

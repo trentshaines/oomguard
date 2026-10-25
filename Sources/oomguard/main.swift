@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import OOMGuardCore
 
-let version = "0.2.0"
+let version = "0.2.1"
 
 let usage = """
 oomguard \(version): an early OOM killer for macOS.
@@ -30,8 +30,9 @@ Options:
   -n, --dry-run              Log and notify what would be killed, but never kill
       --min-size-gb N        Never kill jobs smaller than this
       --interval N           Seconds between samples
-      --simulate KEY=VALUE   Override a reading to test rules and hooks: occupancy=0.9,
-                             headroom-gb=3 or pressure=critical. Repeatable. Kills are
+      --simulate KEY=VALUE   Override a reading to test rules and hooks: occupancy=0.9
+                             (also sets free RAM to 10%), free-ram=0.5, headroom-gb=3 or
+                             pressure=critical. Repeatable, applied in order. Kills are
                              real unless combined with --dry-run.
   -h, --help                 Show this help
 """
@@ -75,20 +76,23 @@ while !args.isEmpty {
     case "--min-size-gb": let n = number(); overrides.append { $0.minSizeGB = n }
     case "--interval": let n = number(); overrides.append { $0.intervalSeconds = max(n, 0.1) }
     case "--max-gb" where command == "exec": maxGB = number()
-    case "-s", "--samples" where command == "log": showSamples = true
+    case "-s" where command == "log", "--samples" where command == "log": showSamples = true
     case "--lines" where command == "log": lines = Int(number())
     case "--simulate":
         let pair = value().split(separator: "=", maxSplits: 1).map(String.init)
         guard pair.count == 2 else { fail("--simulate takes KEY=VALUE") }
         switch (pair[0], Double(pair[1]), pair[1]) {
         case ("occupancy", let n?, _) where (0...1).contains(n):
-            simulations.append { $0.segments = n; $0.pages = n }
+            // A full compressor with plenty of free memory is not a crunch; simulate one.
+            simulations.append { $0.segments = n; $0.pages = n; $0.level = min($0.level, 10) }
+        case ("free-ram", let n?, _) where (0...1).contains(n):
+            simulations.append { $0.level = Int(n * 100) }
         case ("headroom-gb", let n?, _) where n >= 0:
             simulations.append { $0.headroom = UInt64(n * 1_073_741_824) }
         case ("pressure", _, "normal"): simulations.append { $0.pressure = .normal }
         case ("pressure", _, "warn"): simulations.append { $0.pressure = .warn }
         case ("pressure", _, "critical"): simulations.append { $0.pressure = .critical }
-        default: fail("--simulate takes occupancy=0..1, headroom-gb=N or pressure=normal|warn|critical")
+        default: fail("--simulate takes occupancy=0..1, free-ram=0..1, headroom-gb=N or pressure=normal|warn|critical")
         }
     case "-h", "--help": print(usage); exit(0)
     default: fail("unknown option \(flag)\n\n\(usage)")
@@ -115,15 +119,23 @@ switch command {
 case "run":
     // Move out of jetsam band 0, the only band the kernel's compressor-shortage kill takes.
     // The guard re-executes itself once; the environment variable stops a loop.
-    if config.jetsamBand > 0, ProcessInfo.processInfo.environment["OOMGUARD_BAND"] == nil {
+    var protection: String
+    if config.jetsamBand == 0 {
+        protection = "jetsam band left as launched (guard.jetsam_band = 0)"
+    } else if let band = ProcessInfo.processInfo.environment["OOMGUARD_BAND"] {
+        protection = "re-executed into jetsam band \(band)" + (Spawn.band(of: getpid()).map { " (kernel reports \($0))" } ?? "")
+    } else {
         var environment = ProcessInfo.processInfo.environment
         environment["OOMGUARD_BAND"] = String(config.jetsamBand)
         var argv = CommandLine.arguments
         argv[0] = Bundle.main.executablePath ?? argv[0]
-        _ = Spawn.exec(argv, band: Int32(config.jetsamBand), environment: environment)
+        let error = Spawn.exec(argv, band: Int32(config.jetsamBand), environment: environment)
         // Only reached if the re-exec failed; carry on unprotected rather than not at all.
+        protection = "WARNING: could not move into jetsam band \(config.jetsamBand) (\(String(cString: strerror(error))))"
+            + "; the kernel's own memory-shortage kill may take the guard"
     }
-    Runner(config: config, simulate: simulations.isEmpty ? nil : { signals in simulations.forEach { $0(&signals) } }).run()
+    Runner(config: config, simulate: simulations.isEmpty ? nil : { signals in simulations.forEach { $0(&signals) } })
+        .run(protection: protection)
 
 case "status":
     let runner = Runner(config: config)
@@ -131,7 +143,22 @@ case "status":
     print("compressor:    \(Int(s.occupancy * 100))% full (segments \(Int(s.segments * 100))%, pages \(Int(s.pages * 100))%); "
           + "the kernel gives up at 98%, oomguard kills at \(Int(config.killOccupancy * 100))%")
     print("swap:          \(gb(s.swapUsed)) used, \(gb(s.headroom)) of headroom; oomguard kills under \(config.killHeadroomGB)GB")
-    print("pressure:      \(s.pressure) (kern.memorystatus_level \(s.level)%)")
+    let tight = s.pressure > .normal || Double(s.level) <= config.tightFreeRAM * 100
+    print("pressure:      \(s.pressure), \(s.level)% of memory free (kern.memorystatus_level); "
+          + (tight ? "memory is tight: compressor triggers are live" : "compressor triggers wait for free memory under \(percent(config.tightFreeRAM)) or raised pressure"))
+    // Under sudo, look for the invoking user's guard.
+    let user = ProcessInfo.processInfo.environment["SUDO_UID"].flatMap(UInt32.init) ?? getuid()
+    let guards = System.processes(uid: user).filter {
+        $0.pid != getpid() && $0.name == "oomguard" && System.arguments($0.pid).dropFirst().first.map { $0 == "run" || $0.hasPrefix("-") } ?? true
+    }
+    if guards.isEmpty {
+        print("guard:         NOT RUNNING (start it with `make install-service` or `brew services start oomguard`)")
+    } else {
+        for g in guards {
+            let band = Spawn.band(of: g.pid).map { "jetsam band \($0)" } ?? "jetsam band readable only as root (sudo oomguard status)"
+            print("guard:         running, pid \(g.pid), \(band)")
+        }
+    }
     print("config:        \(FileManager.default.fileExists(atPath: configPath) ? configPath : "defaults (no \(configPath))")"
           + (config.dryRun ? " (dry run)" : ""))
     let jobs = runner.candidates(minBytes: 256 * 1_048_576)
@@ -158,6 +185,7 @@ case "exec":
     guard !execCommand.isEmpty, let maxGB, maxGB > 0 else {
         fail("usage: oomguard exec --max-gb N -- command [args...]")
     }
+    guard Spawn.available else { fail("this macOS no longer exports posix_spawnattr_setjetsam_ext, so exec cannot cap memory") }
     let error = Spawn.exec(execCommand, limitMB: Int32(min(maxGB * 1024, Double(Int32.max))))
     fail("cannot run \(execCommand[0]): \(String(cString: strerror(error)))")
 
@@ -170,6 +198,7 @@ case "config":
     kill_eta_seconds:          \(config.killEtaSeconds)
     kill_headroom_gb:          \(config.killHeadroomGB) (immediately under \(config.killHeadroomNowGB))
     pressure_critical_seconds: \(config.pressureCriticalSeconds)
+    tight_free_ram:            \(config.tightFreeRAM)
     warn_occupancy:            \(config.warnOccupancy)
     warn_eta_seconds:          \(config.warnEtaSeconds)
     warn_headroom_gb:          \(config.warnHeadroomGB == 0 ? "RAM size" : String(config.warnHeadroomGB))

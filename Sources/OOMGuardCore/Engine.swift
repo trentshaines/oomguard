@@ -18,6 +18,9 @@ public struct Sample: Equatable, Sendable {
     public var swapinsPerSecond: Double
     /// Seconds since the previous sample; a large value means the guard itself was stalled.
     public var lag: Double
+    /// Memory is actually tight: little free memory, or kernel pressure above normal. Only
+    /// then do the compressor readings mean a crunch rather than leftover empty segments.
+    public var tight: Bool
 }
 
 public struct Tick: Sendable {
@@ -32,6 +35,9 @@ public struct Tick: Sendable {
 /// *continuous* pressure fails when the signal flickers (the bucket resets every few seconds
 /// and never fills); resetting on one clean sample is how a Mac froze on 2026-10-11 with the
 /// guard watching. Immediate arms have a threshold of one.
+///
+/// The compressor arms (occupancy, time to full) only count while memory is tight; see
+/// `Config.tightFreeRAM`.
 ///
 ///   warn   occupancy >= warnOccupancy, eta < warnEtaSeconds or headroom low
 ///          -> notify the user, message the agent that owns the biggest job
@@ -64,11 +70,11 @@ public struct Engine: Sendable {
     var arms: [Arm] {
         let gb = 1_073_741_824.0
         var arms = [
-            Arm(name: "occupancy >= \(percent(config.killOccupancyNow))", strikesNeeded: 1) { $0.signals.occupancy >= config.killOccupancyNow },
+            Arm(name: "occupancy >= \(percent(config.killOccupancyNow))", strikesNeeded: 1) { $0.tight && $0.signals.occupancy >= config.killOccupancyNow },
             Arm(name: "swap headroom < \(config.killHeadroomNowGB)GB", strikesNeeded: 1) { Double($0.signals.headroom) < config.killHeadroomNowGB * gb },
-            Arm(name: "occupancy >= \(percent(config.killOccupancy))", strikesNeeded: 2) { $0.signals.occupancy >= config.killOccupancy },
+            Arm(name: "occupancy >= \(percent(config.killOccupancy))", strikesNeeded: 2) { $0.tight && $0.signals.occupancy >= config.killOccupancy },
             // A fast fill from nearly empty is common and harmless; only believe it from half full.
-            Arm(name: "full in < \(Int(config.killEtaSeconds))s", strikesNeeded: 2) { $0.eta < config.killEtaSeconds && $0.signals.occupancy >= 0.5 },
+            Arm(name: "full in < \(Int(config.killEtaSeconds))s", strikesNeeded: 2) { $0.tight && $0.eta < config.killEtaSeconds && $0.signals.occupancy >= 0.5 },
             Arm(name: "swap headroom < \(config.killHeadroomGB)GB", strikesNeeded: 2) { Double($0.signals.headroom) < config.killHeadroomGB * gb },
         ]
         if config.pressureCriticalSeconds > 0 {
@@ -82,8 +88,8 @@ public struct Engine: Sendable {
     func warnReasons(_ s: Sample) -> [String] {
         let warnHeadroom = config.warnHeadroomGB > 0 ? config.warnHeadroomGB * 1_073_741_824 : Double(s.signals.ram)
         var reasons: [String] = []
-        if s.signals.occupancy >= config.warnOccupancy { reasons.append("compressor \(percent(s.signals.occupancy)) full") }
-        if s.eta < config.warnEtaSeconds && s.signals.occupancy >= 0.3 { reasons.append("full in about \(Int(s.eta))s") }
+        if s.tight && s.signals.occupancy >= config.warnOccupancy { reasons.append("compressor \(percent(s.signals.occupancy)) full") }
+        if s.tight && s.eta < config.warnEtaSeconds && s.signals.occupancy >= 0.3 { reasons.append("full in about \(Int(s.eta))s") }
         if Double(s.signals.headroom) < warnHeadroom { reasons.append("\(gb(s.signals.headroom)) of swap headroom left") }
         return reasons
     }
@@ -157,8 +163,9 @@ public struct Engine: Sendable {
             lag = signals.time - previous.time
             if lag > 0, signals.swapins >= previous.swapins { swapins = Double(signals.swapins - previous.swapins) / lag }
         }
-        return Sample(signals: signals, eta: eta, swapinsPerSecond: swapins, lag: lag)
+        let tight = signals.pressure > .normal || Double(signals.level) <= config.tightFreeRAM * 100
+        return Sample(signals: signals, eta: eta, swapinsPerSecond: swapins, lag: lag, tight: tight)
     }
 }
 
-func percent(_ fraction: Double) -> String { "\(Int((fraction * 100).rounded()))%" }
+public func percent(_ fraction: Double) -> String { "\(Int((fraction * 100).rounded()))%" }

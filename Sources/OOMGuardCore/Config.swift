@@ -30,6 +30,12 @@ public struct Config: Equatable, Sendable {
     public var warnHeadroomGB: Double = 0
     /// After a kill, only the immediate triggers may kill again for this long.
     public var settleSeconds: Double = 5
+    /// The occupancy and fill-rate triggers only count while memory is actually tight: free
+    /// memory (kern.memorystatus_level) at or below this fraction, or kernel pressure above
+    /// normal. The kernel frees empty compressor segments lazily, so segment occupancy stays
+    /// high for a long time after a crunch ends; without this a kill would be followed by
+    /// kills of innocent jobs. 1 makes those triggers count at any time.
+    public var tightFreeRAM: Double = 0.40
 
     // [victim]
     /// Jobs smaller than this are never killed: they cannot be what is breaking the machine.
@@ -170,6 +176,7 @@ extension Config {
         warnEtaSeconds = try number("trigger.warn_eta_seconds", warnEtaSeconds)
         warnHeadroomGB = try number("trigger.warn_headroom_gb", warnHeadroomGB)
         settleSeconds = try number("trigger.settle_seconds", settleSeconds)
+        tightFreeRAM = try number("trigger.tight_free_ram", tightFreeRAM)
         minSizeGB = try number("victim.min_size_gb", minSizeGB)
         prefer = try strings("victim.prefer", prefer)
         avoid = try strings("victim.avoid", avoid)
@@ -199,7 +206,8 @@ extension Config {
         guard intervalSeconds > 0, nonNegative.allSatisfy({ $0 >= 0 }) else {
             throw ConfigError(description: "durations and sizes must not be negative")
         }
-        for (name, value) in [("kill_occupancy", killOccupancy), ("kill_occupancy_now", killOccupancyNow), ("warn_occupancy", warnOccupancy)]
+        for (name, value) in [("kill_occupancy", killOccupancy), ("kill_occupancy_now", killOccupancyNow), ("warn_occupancy", warnOccupancy),
+                             ("tight_free_ram", tightFreeRAM)]
         where !(0...1).contains(value) {
             throw ConfigError(description: "trigger.\(name) must be a fraction between 0 and 1")
         }
