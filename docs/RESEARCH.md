@@ -301,8 +301,9 @@ other job was protected by a `never` rule, and the installed guard kept running 
   at a threshold can therefore land a few points past it; the 92% immediate arm leaves 6 points
   below the kernel's 98%.
 - **Segment occupancy is sticky.** 20 s after the kill free memory was back at 65% and pressure
-  normal, but segment occupancy stayed at 34% (42% after a second run), and page occupancy fell
-  back to 8%. The kernel compacts segments when it needs them: one run started at 24.5% and dropped
+  normal, but segment occupancy stayed at 34% (42% after a second run) while page occupancy fell
+  back to 8%. It stayed near 40% for 34 hours, then dropped from 38% to 12% between two
+  one-second samples with 84% of memory free. The kernel compacts segments when it needs them: one run started at 24.5% and dropped
   to 16.5% as the new fill began. Hence the tight-memory gate above.
 - **Segments, not pages, are the binding limit** for incompressible data: pages occupancy never
   passed 13%.

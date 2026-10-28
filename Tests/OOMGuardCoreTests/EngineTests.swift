@@ -141,7 +141,7 @@ func simulate(_ config: Config = Config(), seconds: Int, victim: Job? = job(), _
 }
 
 /// 2026-10-25 fill test on a 64GB Mac mini: after the pool was killed, free memory was back to
-/// 65% within 20s but compressor segment occupancy stayed where the crunch left it for good.
+/// 65% within 20s but compressor segment occupancy stayed where the crunch left it for 34 hours.
 /// Leftover empty segments are not a crunch, so nothing else may die for them.
 @Test func leftoverSegmentsWithFreeMemoryDoNotKill() {
     let outcome = simulate(seconds: 600) { t in reading(t, occupancy: 0.95, freeRAM: 65) }
